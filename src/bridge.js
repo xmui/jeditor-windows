@@ -75,6 +75,8 @@
         } else if (msg.type === 'notice') {
             // Something the app has to say, once jEditor is up
             whenReady().then(() => UI.alert({ title: msg.title, message: msg.text }));
+        } else if (msg.type === 'filesChanged') {
+            dispatchEvent(new Event('jeditor-files')); // another window moved photos
         } else if (msg.type === 'drivesChanged') {
             dispatchEvent(new Event('jeditor-drives')); // places.js
         }
@@ -267,6 +269,34 @@
         },
         cancelScan() {
             post({ type: 'cancelScan' });
+        },
+        // ---- Windows: one project each ----
+        // Another jEditor window, opening `path` (or the start screen)
+        async newWindow(path) {
+            return (await answer('newWindow', path ? { path } : {})).msg.ok;
+        },
+        // This window on the left half of the screen, another on the right
+        async split() {
+            return (await answer('split')).msg.ok;
+        },
+        // What this window shows, for the others' Move to:
+        // { name, path, folders: ['', 'Ceremony', …] }
+        setState(state) {
+            post({ type: 'state', ...state });
+        },
+        // The other windows' projects → [{ id, name, path, folders }]
+        async windows() {
+            return (await answer('windows')).msg.windows;
+        },
+        // Photos (paths) moved or copied into a folder (a path), each under a
+        // free name → [{ from, to } or { from, error }]. Every window hears
+        // of it ('jeditor-files').
+        async transfer(paths, dest, copy) {
+            return (await answer('transfer', { paths, dest, copy: !!copy })).msg.items;
+        },
+        // Undoes one: moved photos go back, copies go → [error or null]
+        async undoTransfer(items, copy) {
+            return (await answer('undoTransfer', { items, copy: !!copy })).msg.errors;
         },
         // Shows jEditor's log in Explorer
         async showLog() {

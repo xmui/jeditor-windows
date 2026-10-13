@@ -164,6 +164,30 @@ const FAKE_NATIVE = `
         async eject(p) { window.__ejected = p; window.__drives = window.__drives.filter(d => d.path !== p); return { ok: true }; },
         async reveal(p) { window.__revealed = p; return true; },
         async pickPath() { return window.__pick || null; },
+        // Windows: the other windows are __others; transfers move files in disk/
+        setState(st) { window.__state = st; },
+        async windows() { return window.__others || []; },
+        async newWindow(p) { window.__newWindow = p || '(start)'; return true; },
+        async split() { window.__split = true; return true; },
+        async transfer(paths, dest, copy) {
+            window.__transfer = { paths, dest, copy };
+            const root = window.__orderRoot + BS;
+            let dir = await sub('disk');
+            for (const p of dest.slice(root.length).split(BS).filter(Boolean)) dir = await dir.getDirectoryHandle(p);
+            const out = [];
+            for (const from of paths) {
+                const hit = await locate(from);
+                if (!hit) { out.push({ from, error: 'not there any more' }); continue; }
+                const data = await (await hit.dir.getFileHandle(hit.name)).getFile();
+                const w = await (await dir.getFileHandle(hit.name, { create: true })).createWritable();
+                await w.write(data);
+                await w.close();
+                if (!copy) await hit.dir.removeEntry(hit.name);
+                out.push({ from, to: dest + BS + hit.name });
+            }
+            return out;
+        },
+        async undoTransfer(items, copy) { window.__undoTransfer = { items, copy }; return items.map(() => null); },
         async openPath(p) { window.__opened = p; return true; },
         async exists(paths) { return paths.map(p => !(window.__missing || []).includes(p)); },
         async checkUpdate() { window.__calls.push('checkUpdate'); return window.__update || { newer: false, version: '1.0.0', tag: 'v1.0.0', notes: '' }; },
@@ -244,7 +268,7 @@ const HELPERS = `
 async function newPage(context, baseUrl) {
     const page = await context.newPage();
     const errors = [];
-    page.on('pageerror', e => errors.push(e.message));
+    page.on('pageerror', e => errors.push(e.message + (process.env.STACKS ? ' @ ' + e.stack : '')));
     page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
     await page.addInitScript(FAKE_NATIVE);
     await page.goto(`${baseUrl}/index.html`);
@@ -696,6 +720,82 @@ async function newPage(context, baseUrl) {
         check('scanning into it shows the photos', r.names === 'Empty-001.jpg,Empty-002.jpg' && r.files === 2 && r.noMessage, JSON.stringify([r.names, r.files, r.noMessage]));
         check('deleting every photo keeps it open, empty', r.stillOpen && r.emptyAgain, JSON.stringify([r.stillOpen, r.emptyAgain]));
         check('empty project suite: no JS errors', errors.length === 0, errors.join('; '));
+        await context.close();
+    }
+
+    console.log('native: windows (Split, New window, photos between windows)');
+    {
+        const context = await browser.newContext();
+        const { page, errors } = await newPage(context, baseUrl);
+        const r = await page.evaluate(async () => {
+            const out = {};
+            const $ = (id) => document.getElementById(id);
+            const BS = String.fromCharCode(92);
+            await makeOrder('Other', 2);
+            const dir = await makeOrder('Here', 2);
+            await openOrder(dir);
+            app.setView('grid');
+            if (!Folders.railOpen()) Folders.toggleRail();
+            // It tells the app what it shows
+            await wait(() => window.__state && window.__state.name === 'Here');
+            out.state = window.__state;
+            // Split and New window
+            await wait(() => $('sb-card').querySelector('[data-act="split"]'));
+            $('sb-card').querySelector('[data-act="split"]').click();
+            await wait(() => window.__split);
+            out.split = window.__split;
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'N', ctrlKey: true, shiftKey: true, bubbles: true }));
+            await wait(() => window.__newWindow);
+            out.newWindow = window.__newWindow;
+
+            // M lists the other window's folders; choosing one moves the photos there
+            window.__others = [{ id: 2, name: 'Other', path: window.__orderRoot + BS + 'Other', folders: ['', 'Ceremony'] }];
+            const p1 = app.files.find(f => f.name === 'photo1.jpg');
+            Folders.openPicker([p1], 'move');
+            await wait(() => [...document.querySelectorAll('#fp-list .fp-row')].some(r => /other window/.test(r.textContent)));
+            const rows = [...document.querySelectorAll('#fp-list .fp-row')].filter(r => /other window/.test(r.textContent)).map(r => r.querySelector('.fp-name').textContent);
+            out.pickerRows = rows.join(' | ');
+            const item = Folders.pickerItems.find(it => it.kind === 'window' && it.path === 'Ceremony');
+            await Folders.choose(item);
+            await wait(() => window.__transfer);
+            out.moved = window.__transfer;
+            await wait(() => !app.files.some(f => f.name === 'photo1.jpg'));
+            out.gone = !app.files.some(f => f.name === 'photo1.jpg');
+            out.toast = toasts();
+            // Ctrl+Z puts it back
+            await app.undo();
+            out.undo = window.__undoTransfer;
+
+            // Dropped from another window onto a folder here
+            window.__transfer = null;
+            const dt = new DataTransfer();
+            dt.setData(Windows.TYPE, JSON.stringify([window.__orderRoot + BS + 'Other' + BS + 'photo2.jpg']));
+            const row = document.querySelector('#folder-tree [data-folder-path="Ceremony"]');
+            row.dispatchEvent(new DragEvent('dragover', { dataTransfer: dt, bubbles: true, cancelable: true }));
+            row.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true, ctrlKey: true }));
+            await wait(() => window.__transfer);
+            out.dropped = window.__transfer;
+            await wait(() => app.files.some(f => f.relPath === 'Ceremony/photo2.jpg'));
+            out.arrived = app.files.some(f => f.relPath === 'Ceremony/photo2.jpg');
+            // Ctrl+click a project in the sidebar: a window of its own
+            window.__newWindow = null;
+            localStorage.setItem('jeditor.projectsFolder', JSON.stringify(window.__orderRoot));
+            await Places.refresh();
+            const otherRow = [...$('sb-places').querySelectorAll('.sb-row')].find(r => r.querySelector('.fr-name').textContent === 'Other');
+            otherRow.querySelector('.sb-main').dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+            await wait(() => window.__newWindow);
+            out.ctrlClick = window.__newWindow;
+            return out;
+        });
+        const D = 'D:\\Orders\\';
+        check('a window tells the app its project and folders', r.state.path === D + 'Here' && r.state.folders.join() === ',Ceremony', JSON.stringify(r.state));
+        check('Split and New window (Ctrl+Shift+N)', r.split && r.newWindow === '(start)', JSON.stringify([r.split, r.newWindow]));
+        check('M lists the other window\'s folders', r.pickerRows === 'Other | Other / Ceremony', r.pickerRows);
+        check('... and moves the photos there, by path', r.moved && r.moved.paths.join() === D + 'Here\\photo1.jpg' && r.moved.dest === D + 'Other\\Ceremony' && !r.moved.copy && r.gone, JSON.stringify(r.moved));
+        check('... saying so, and Ctrl+Z undoes it', /Moved 1 photo into Other \/ Ceremony/.test(r.toast) && r.undo && r.undo.items[0].from === D + 'Here\\photo1.jpg', JSON.stringify([r.toast, r.undo]));
+        check('photos dropped from another window onto a folder come in (Ctrl copies)', r.dropped && r.dropped.dest === D + 'Here\\Ceremony' && r.dropped.copy && r.arrived, JSON.stringify(r.dropped));
+        check('Ctrl+click a project opens it in a new window', r.ctrlClick === D + 'Other', String(r.ctrlClick));
+        check('windows suite: no JS errors', errors.length === 0, errors.join('; '));
         await context.close();
     }
 
