@@ -375,6 +375,7 @@
             steps[step] = msg.ok ? true : (msg.detail || 'failed');
         };
         const listed = a.files.length;
+        let lastScanned = null; // the scan step's last photo, moved by the windows step
         const file = a.files[0];
         const rotated = file ? await a.rotateImage(file, 90) !== false : false;
         try {
@@ -401,6 +402,7 @@
                     steps.scanned = 'no test scanner';
                 } else {
                     const r = await Scan.run({ device: test.id, driver: test.driver, folder: '' });
+                    lastScanned = r.names[r.names.length - 1];
                     const shown = () => r.names.filter(n => a.files.some(f => (f.relPath || f.name) === n)).length;
                     for (let i = 0; i < 75 && shown() < r.names.length; i++) await new Promise(res => setTimeout(res, 200));
                     await check('scanned', { names: r.names, shown: shown() });
@@ -424,6 +426,27 @@
                     steps.counted = counts[0] === a.files.length ? true : `counted ${counts[0]} photos, jEditor shows ${a.files.length}`;
                 }
                 steps.pins = Array.isArray(await window.JEditorNative.quickAccess()) || 'no answer';
+            }
+            // Windows: a second one opens, the two split, and a photo moves
+            // into a folder through the app and back (Ctrl+Z)
+            {
+                await window.JEditorNative.newWindow(null);
+                await new Promise(r => setTimeout(r, 1500));
+                await check('windows');
+                await window.JEditorNative.split();
+                const here = await window.JEditorNative.folderPath(a.dirHandle);
+                const scan = lastScanned && a.files.find(f => (f.relPath || f.name) === lastScanned);
+                if (here && scan) {
+                    await a.dirHandle.getDirectoryHandle('Moved', { create: true });
+                    const from = here + '\\' + scan.name;
+                    const items = await window.JEditorNative.transfer([from], here + '\\Moved', false);
+                    await check('moved', { name: 'Moved/' + scan.name });
+                    const errors = await window.JEditorNative.undoTransfer(items.filter(i => i.to), false);
+                    steps.unmoved = errors.every(e => !e) || String(errors);
+                    await check('back', { name: scan.name });
+                } else {
+                    steps.moved = 'nothing to move';
+                }
             }
             try {
                 const u = await window.JEditorNative.checkUpdate();

@@ -606,8 +606,12 @@ async function newPage(context, baseUrl) {
             folder.dispatchEvent(new Event('change'));
             $('scan-compat').checked = true;
             $('scan-go').click();
-            out.closed = !Scan.isOpen();
+            // The dock stays, showing the photos as they come in
+            await wait(() => $('scan-panel').dataset.state !== 'setup');
+            out.closed = !$('scan-panel').classList.contains('hidden');
             await wait(() => app.files.some(f => f.name === 'photo5.jpg'));
+            await wait(() => $('scan-panel').dataset.state === 'done');
+            out.dock = { title: $('scan-title').textContent, status: $('scan-status').textContent, strip: $('scan-strip').querySelectorAll('figure').length, more: $('scan-go').textContent };
             out.req = window.__scanReq;
             out.compatKept = JSON.parse(localStorage.getItem('jeditor.scanCompat') || '{}')['EPSON FF-680W'] === true;
             out.files = app.files.map(f => f.relPath || f.name).sort().join(',');
@@ -621,9 +625,13 @@ async function newPage(context, baseUrl) {
             await Scan.run({ device: 'EPSON FF-680W', driver: 'twain', folder: 'Ceremony', autoCrop: true });
             app.batchAutoCrop = realCrop;
 
-            // Scan more: the names carry on
+            // Scan more (in the dock): the names carry on
             window.__scanPages = 1;
-            out.more = (await Scan.run({ device: 'EPSON FF-680W', driver: 'twain', folder: '' })).names.join(',');
+            await wait(() => app.files.some(f => f.relPath === 'Ceremony/c3.jpg'));
+            $('scan-go').click();
+            await wait(() => app.files.some(f => f.name === 'photo6.jpg'));
+            await wait(() => !Scan.running);
+            out.more = window.__scanReq.prefix + window.__scanReq.next + '.jpg';
 
             // The scanner stops with an error: says so, and what was saved
             window.__scanError = 'The scanner is busy (is another program using it?)';
@@ -638,15 +646,16 @@ async function newPage(context, baseUrl) {
             // A scanner that never shows its window: Stop ends it
             window.__scanHang = true;
             const hung = Scan.run({ device: 'EPSON FF-680W', driver: 'twain', folder: '' });
-            await wait(() => [...document.querySelectorAll('.toast')].some(t => /Scanning with EPSON FF-680W/.test(t.textContent)));
-            const toast = [...document.querySelectorAll('.toast')].find(t => /Scanning with/.test(t.textContent));
-            out.stopOffered = /Stop/.test(toast.textContent);
-            [...toast.querySelectorAll('button')].find(b => b.textContent === 'Stop').click();
+            await wait(() => $('scan-panel').dataset.state === 'scanning');
+            out.stopOffered = getComputedStyle($('scan-stop')).display !== 'none' && /Scanning · EPSON FF-680W/.test($('scan-title').textContent);
+            // Closing it while it scans only makes it small
+            $('scan-x').click();
+            out.small = $('scan-panel').classList.contains('small') && !$('scan-panel').classList.contains('hidden');
+            Scan.setSmall(false);
+            $('scan-stop').click();
             const stopped = await hung;
             out.stopped = stopped.cancelled && window.__cancelled && !Scan.running;
-            await wait(() => /Scan stopped/.test(toasts()));
-            await new Promise(r => setTimeout(r, 400)); // dismissed messages take 300 ms to go
-            out.stopToast = toasts();
+            out.stopToast = $('scan-status').textContent;
             window.__scanHang = false;
 
             // Settings: Show log
@@ -668,17 +677,18 @@ async function newPage(context, baseUrl) {
         check('it offers the order\'s folders, starting with the one with the most photos', r.folder === '' && r.folders === 'Scan Order, Ceremony', JSON.stringify([r.folder, r.folders]));
         check('names follow on from the folder\'s photos', r.names[0] === 'photo' && r.names[1] === '4' && r.names[2] === 'photo4.jpg, photo5.jpg, …', JSON.stringify(r.names));
         check('... each folder its own sequence', r.cerNames.join() === 'c,2', r.cerNames.join());
-        check('Scan asks the app to scan into the order\'s folder, by path', r.closed && r.req && r.req.folder === 'D:\\Orders\\Scan Order' && r.req.device === 'EPSON FF-680W' && r.req.driver === 'twain' && r.req.prefix === 'photo' && r.req.next === 4, JSON.stringify(r.req));
+        check('the dock stays while it scans, then says how many, with the photos and Scan more', r.closed && /^Scanned 2 photos into Scan Order/.test(r.dock.status) && r.dock.strip === 2 && r.dock.more === 'Scan more' && /Scanned · EPSON FF-680W/.test(r.dock.title), JSON.stringify(r.dock));
+        check('Scan asks the app to scan into the order\'s folder, by path', r.req && r.req.folder === 'D:\\Orders\\Scan Order' && r.req.device === 'EPSON FF-680W' && r.req.driver === 'twain' && r.req.prefix === 'photo' && r.req.next === 4, JSON.stringify(r.req));
         check('scanned photos show up in the order', r.files === 'Ceremony/c1.jpg,photo1.jpg,photo2.jpg,photo3.jpg,photo4.jpg,photo5.jpg', r.files);
-        check('a message says how many, with Scan more', /Scanned 2 photos into Scan Order/.test(r.toast) && /Scan more/.test(r.toast), r.toast);
+        check('a message says how many', /Scanned 2 photos into Scan Order/.test(r.toast), r.toast);
         check('Auto crop each photo is on to start with', r.autoCropDefault);
         check('Compatibility mode: offered for TWAIN scanners only, off to start with', r.compatShown && r.compatHiddenWia, JSON.stringify([r.compatShown, r.compatHiddenWia]));
         check('... sent with the scan, and remembered for that scanner', r.req.compat === true && r.compatKept, JSON.stringify([r.req.compat, r.compatKept]));
         check('... and crops each scan once it\'s in, without asking', r.cropped === 'c2.jpg,c3.jpg (no question)', r.cropped);
-        check('scanning again carries on the names', r.more === 'photo6.jpg', r.more);
+        check('Scan more in the dock carries on the names', r.more === 'photo6.jpg', r.more);
         check('a scan that fails says why, and what was saved', /busy/.test(r.err || '') && /didn't finish/.test(r.alert) && /1 photo was saved/.test(r.alert) && !r.running, JSON.stringify([r.err, r.alert]));
-        check('while scanning, a message offers Stop', r.stopOffered);
-        check('Stop ends a scan whose window never shows', r.stopped && /Scan stopped/.test(r.stopToast) && !/Scanning with/.test(r.stopToast), JSON.stringify([r.stopped, r.stopToast]));
+        check('while scanning, the dock offers Stop; closing it only makes it small', r.stopOffered && r.small, JSON.stringify([r.stopOffered, r.small]));
+        check('Stop ends a scan whose window never shows', r.stopped && r.stopToast === 'Scan stopped', JSON.stringify([r.stopped, r.stopToast]));
         check('Settings: Show log', r.log);
         check('no scanners: says so and what to check', /No scanners found/.test(r.none) && /plugged in/.test(r.none) && /TWAINDSM/.test(r.none) && r.noneDisabled, r.none);
         check('scan suite: no JS errors', errors.length === 0, errors.join('; '));
@@ -853,7 +863,7 @@ async function newPage(context, baseUrl) {
             await wait(() => window.__revealed);
             out.revealed = window.__revealed;
             $('sb-card').querySelector('[data-act="scan"]').click();
-            out.scanOpen = Scan.isOpen();
+            out.scanOpen = Scan.visible();
             Scan.close();
             $('sb-card').querySelector('[data-act="pin"]').click();
             await wait(() => [...side.querySelectorAll('.sb-pinned .fr-name')].some(n => n.textContent === 'Alpha'));
